@@ -7,21 +7,23 @@
 # 用法:
 #   sh install.sh                  装当前系统对应的后端
 #   sh install.sh --all            两个后端都装上
+#   sh install.sh --uninstall      卸载（只删装进来的文件，不还原系统改动）
 #   sh install.sh --dry-run        只打印会做什么
 # =========================================================
 set -u
 
-VERSION="1.0.0"
+VERSION="1.0.1"
 REPO="${VPS_TUNE_REPO:-jyucoeng/vps-tune}"
 BRANCH="${VPS_TUNE_BRANCH:-main}"
 BIN_DIR="${PREFIX:-/usr/local}/bin"
 SHARE_DIR="${PREFIX:-/usr/local}/share/vps-tune"
 
-DRY=0; ALL=0
+DRY=0; ALL=0; UNINST=0
 for a in "$@"; do
   case "$a" in
     --dry-run) DRY=1 ;;
     --all) ALL=1 ;;
+    --uninstall) UNINST=1 ;;
     -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -V|--version) echo "vps-tune install.sh $VERSION"; exit 0 ;;
     *) echo "未知参数: ${a}（--help 看用法）"; exit 1 ;;
@@ -66,21 +68,36 @@ dl() { # <url> <out> [header]
 fetch() { # <相对文件名> <目标路径> <sh>
   local f="$1" dest="$2" sh="${3:-sh}" tmp="${2}.part.$$"
   say "   拉取 $f"
-  if dl "https://raw.githubusercontent.com/$REPO/$BRANCH/$f?ts=$(date +%s)" "$tmp" \
-     && [ -s "$tmp" ] && "$sh" -n "$tmp" 2>/dev/null; then
-    mv -f "$tmp" "$dest"; ok "$dest"
-    return 0
-  fi
-  rm -f "$tmp"
-  warn "直链失败，改用 GitHub API"
+  # API 优先：raw 的 CDN 会长期留旧副本（?ts= 也压不住），旧文件语法合法会被误判成下载成功
   if dl "https://api.github.com/repos/$REPO/contents/$f?ref=$BRANCH" "$tmp" \
         "Accept: application/vnd.github.raw" \
      && [ -s "$tmp" ] && "$sh" -n "$tmp" 2>/dev/null; then
     mv -f "$tmp" "$dest"; ok "$dest"
     return 0
   fi
+  rm -f "$tmp"
+  warn "API 失败，改用 raw 直链（可能是旧版本）"
+  if dl "https://raw.githubusercontent.com/$REPO/$BRANCH/$f?ts=$(date +%s)" "$tmp" \
+     && [ -s "$tmp" ] && "$sh" -n "$tmp" 2>/dev/null; then
+    mv -f "$tmp" "$dest"; ok "$dest"
+    return 0
+  fi
   rm -f "$tmp"; bad "拉取失败：$f"; return 1
 }
+
+if [ "$UNINST" = 1 ]; then
+  say "vps-tune 卸载"
+  if [ "$DRY" = 1 ]; then
+    say "   将删除: $BIN_DIR/vps-tune  和  $SHARE_DIR/"
+    exit 0
+  fi
+  rm -f "$BIN_DIR/vps-tune"
+  rm -rf "$SHARE_DIR"
+  ok "已删除 $BIN_DIR/vps-tune"
+  ok "已删除 $SHARE_DIR/"
+  say "   注意：这只删程序，不还原系统改动。要撤销调优用 vps-tune --rollback（仅 Debian/Ubuntu）。"
+  exit 0
+fi
 
 OS=$(detect_os)
 TARGETS=""

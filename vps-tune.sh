@@ -1,6 +1,6 @@
 #!/bin/sh
 # =========================================================
-# vps-tune.sh  v1.0.3 (2026-11-09)
+# vps-tune.sh  v1.0.4 (2026-11-09)
 # VPS 一键调优统一入口：自动识别 Alpine / Debian / Ubuntu 并调用对应后端
 #
 # 后端:
@@ -19,7 +19,7 @@
 # =========================================================
 set -u
 
-VERSION="1.0.3"
+VERSION="1.0.4"
 REPO="${VPS_TUNE_REPO:-jyucoeng/vps-tune}"
 BRANCH="${VPS_TUNE_BRANCH:-main}"
 CACHE_DIR="${VPS_TUNE_CACHE_DIR:-/var/cache/vps-tune}"
@@ -198,6 +198,23 @@ case "$OS" in
   *) bad "无法识别的系统，只支持 Alpine / Debian / Ubuntu"
      say "   确定要跑某个后端，用 --os alpine|debian 强制指定"; exit 3 ;;
 esac
+
+# Alpine 后端没有回滚能力。这里必须先拦：--rollback 会被当作「本后端不支持」丢掉，
+# 丢掉之后就变成不带参数的默认调用，也就是真执行一遍优化 —— 与用户意图相反。
+if [ "$OS" = alpine ]; then
+  case "$RAW" in
+    *--rollback*)
+      bad "Alpine 侧没有自动回滚（只有 Debian / Ubuntu 有）"
+      say ""
+      say "   手动撤销（按需执行）："
+      say "     rm -f /etc/sysctl.d/99-alpine-optimize.conf /etc/local.d/99-alpine-optimize.start"
+      say "     ls -t /etc/apk/repositories.bak.* 2>/dev/null | head -1   # 找到最近的源备份"
+      say "     cp -a <上面列出的那个备份> /etc/apk/repositories"
+      say ""
+      say "   已经写进内核的参数要重启才回到系统默认；时区 / 主机名不会被还原。"
+      exit 2 ;;
+  esac
+fi
 
 # ---------------- 参数透传与默认值 ----------------
 # 带值的标志，丢的时候要连值一起丢
