@@ -1,6 +1,6 @@
 #!/bin/sh
 # =========================================================
-# vps-tune.sh  v1.0.1 (2026-11-09)
+# vps-tune.sh  v1.0.3 (2026-11-09)
 # VPS 一键调优统一入口：自动识别 Alpine / Debian / Ubuntu 并调用对应后端
 #
 # 后端:
@@ -19,7 +19,7 @@
 # =========================================================
 set -u
 
-VERSION="1.0.2"
+VERSION="1.0.3"
 REPO="${VPS_TUNE_REPO:-jyucoeng/vps-tune}"
 BRANCH="${VPS_TUNE_BRANCH:-main}"
 CACHE_DIR="${VPS_TUNE_CACHE_DIR:-/var/cache/vps-tune}"
@@ -34,7 +34,7 @@ else
 fi
 say()  { printf '%s\n' "$*"; }
 ok()   { printf '   %s✓%s %s\n' "$C_G" "$C_N" "$*"; }
-warn() { printf '   %s!%s %s\n' "$C_Y" "$C_N" "$*"; }
+warn() { printf '   %s!%s %s\n' "$C_Y" "$C_N" "$*" >&2; }
 bad()  { printf '   %s✗%s %s\n' "$C_R" "$C_N" "$*" >&2; }
 
 usage() {
@@ -129,7 +129,7 @@ download_backend() { # <os> <dest>
   _url="https://raw.githubusercontent.com/$REPO/$BRANCH/$_f?ts=$(date +%s)"
   _api="https://api.github.com/repos/$REPO/contents/$_f?ref=$BRANCH"
 
-  say "   下载 $_f ..."
+  say "   下载 $_f ..." >&2
   rm -f "$_tmp" 2>/dev/null
   # 先走 GitHub API：raw.githubusercontent 的 CDN 会长期留着旧副本（带 ?ts= 也压不住），
   # 旧副本语法合法但内容过期，很容易被误当成「下载成功」。API 的 contents 接口不吃这层缓存。
@@ -159,7 +159,7 @@ resolve_backend() { # <os> -> 打印后端路径
   if [ -n "${_dir:-}" ] && [ -f "$_dir/$_f" ] && valid_backend "$_dir/$_f" "$_sh"; then
     if [ "${OFFLINE:-0}" = 1 ]; then echo "$_dir/$_f"; return 0; fi
     if download_backend "$_os" "$_dir/$_f" >/dev/null 2>&1; then echo "$_dir/$_f"; return 0; fi
-    warn "联网刷新失败，改用本地缓存 $_dir/$_f" >&2
+    warn "联网刷新失败，改用本地缓存 $_dir/$_f"
     echo "$_dir/$_f"; return 0
   fi
 
@@ -167,7 +167,7 @@ resolve_backend() { # <os> -> 打印后端路径
     bad "--offline 但没有可用的本地后端（${_f}）"; return 1
   fi
   [ -n "${_dir:-}" ] || { bad "没有可写的缓存目录（$CACHE_DIR / ${FALLBACK_CACHE}）"; return 1; }
-  download_backend "$_os" "$_dir/$_f" || { bad "下载后端失败：$_f"; return 1; }
+  download_backend "$_os" "$_dir/$_f" >&2 || { bad "下载后端失败：$_f"; return 1; }
   valid_backend "$_dir/$_f" "$_sh" || { bad "后端校验失败：$_dir/$_f"; return 1; }
   echo "$_dir/$_f"
 }
