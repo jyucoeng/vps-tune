@@ -19,7 +19,7 @@
 # =========================================================
 set -u
 
-VERSION="1.0.1"
+VERSION="1.0.2"
 REPO="${VPS_TUNE_REPO:-jyucoeng/vps-tune}"
 BRANCH="${VPS_TUNE_BRANCH:-main}"
 CACHE_DIR="${VPS_TUNE_CACHE_DIR:-/var/cache/vps-tune}"
@@ -131,12 +131,14 @@ download_backend() { # <os> <dest>
 
   say "   下载 $_f ..."
   rm -f "$_tmp" 2>/dev/null
-  if dl "$_url" "$_tmp" && valid_backend "$_tmp" "$_sh"; then
+  # 先走 GitHub API：raw.githubusercontent 的 CDN 会长期留着旧副本（带 ?ts= 也压不住），
+  # 旧副本语法合法但内容过期，很容易被误当成「下载成功」。API 的 contents 接口不吃这层缓存。
+  if dl "$_api" "$_tmp" "Accept: application/vnd.github.raw" && valid_backend "$_tmp" "$_sh"; then
     mv -f "$_tmp" "$_dest"; return 0
   fi
   rm -f "$_tmp" 2>/dev/null
-  warn "raw.githubusercontent 直链不可用，改用 GitHub API"
-  if dl "$_api" "$_tmp" "Accept: application/vnd.github.raw" && valid_backend "$_tmp" "$_sh"; then
+  warn "GitHub API 不可用（可能是限流），改用 raw 直链（可能是旧版本）"
+  if dl "$_url" "$_tmp" && valid_backend "$_tmp" "$_sh"; then
     mv -f "$_tmp" "$_dest"; return 0
   fi
   rm -f "$_tmp" 2>/dev/null
