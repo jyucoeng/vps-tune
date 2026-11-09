@@ -157,6 +157,15 @@ sh /root/doraemon/vps-tune.sh --apply --no-ssh        # Alpine 会自动补 --dr
 
 各系统的后端由 `vps-tune.sh` 自己识别，`sb.sh` 不再分叉。失败不阻断安装（`|| warn`）。
 
+## 更新记录
+
+| 版本 | 变更 |
+|---|---|
+| 1.0.3 | 修 `resolve_backend` 的 stdout 被下载进度污染（`exec "bash 下载 tune-debian.sh …"` 报 No such file）；`warn` 统一走 stderr |
+| 1.0.2 | 后端下载改成 **GitHub API 优先**：`raw.githubusercontent` 的 CDN 会长期留旧副本，`?ts=` 也压不住，旧文件语法合法会被误判成下载成功；API 限流时才回落 raw |
+| 1.0.1 | `vps-tune.sh` 改**纯 POSIX sh**（去掉 bash 数组，用 `set --` 重排参数），`curl … \| sh`、dash、busybox ash 都能跑；修 Debian 12 上 `Syntax error: "(" unexpected` |
+| 1.0.0 | 首版：合并 [alpine-onekey](https://github.com/jyucoeng/alpine-onekey)（`tune-alpine.sh`）与 [ovz-tune](https://github.com/jyucoeng/ovz-tune)（`tune-debian.sh`），加统一入口与 `install.sh` |
+
 ## 免责
 
 按「现状」提供，无任何担保。会改 `sysctl` / `sshd_config` / `journald.conf` / `limits.conf` / apk 或 apt 源。跑之前先 `--dry-run`，自己备份，失联或数据丢失自负。License: MIT
