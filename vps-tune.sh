@@ -1,6 +1,6 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # =========================================================
-# vps-tune.sh  v1.0.0 (2026-11-09)
+# vps-tune.sh  v1.0.1 (2026-11-09)
 # VPS 一键调优统一入口：自动识别 Alpine / Debian / Ubuntu 并调用对应后端
 #
 # 后端:
@@ -8,6 +8,7 @@
 #   tune-debian.sh   Debian / Ubuntu（sysctl、bbr+fq、journald、limits、sshd、MTU）
 #
 # 设计约定:
+#   * 纯 POSIX sh，没有 bash 也能跑（`curl … | sh` 可用）
 #   * 默认演练（--dry-run），加 --apply 才真实改动
 #   * 默认不改 SSH 登录策略；要放开密码登录必须显式 --ssh
 #   * 后端脚本查找顺序：同目录 → /usr/local/share/vps-tune → 缓存 → 联网，
@@ -18,7 +19,7 @@
 # =========================================================
 set -u
 
-VERSION="1.0.0"
+VERSION="1.0.1"
 REPO="${VPS_TUNE_REPO:-jyucoeng/vps-tune}"
 BRANCH="${VPS_TUNE_BRANCH:-main}"
 CACHE_DIR="${VPS_TUNE_CACHE_DIR:-/var/cache/vps-tune}"
@@ -67,6 +68,8 @@ vps-tune — VPS 一键调优统一入口（Alpine / Debian / Ubuntu）
   VPS_TUNE_BRANCH    默认 main
   VPS_TUNE_CACHE_DIR 后端脚本缓存目录，默认 /var/cache/vps-tune
   VPS_TUNE_OS        等价于 --os
+
+注意: 参数按空格切分，取值里不要带空格（时区、主机名、容量都没有空格）。
 EOF
 }
 
@@ -98,73 +101,80 @@ valid_backend() { # <file> <sh>
   "$2" -n "$1" >/dev/null 2>&1
 }
 
-dl() { # <url> <out> [header...]
-  local url="$1" out="$2"; shift 2
-  local h
+dl() { # <url> <out> [header]
+  _d_url="$1"; _d_out="$2"; _d_hdr="${3:-}"
   if command -v curl >/dev/null 2>&1; then
-    local args=()
-    for h in "$@"; do args+=(-H "$h"); done
-    curl -fsSL --connect-timeout 8 --max-time 120 --retry 2 --retry-delay 2 \
-         --retry-all-errors "${args[@]}" -o "$out" "$url" >/dev/null 2>&1
+    if [ -n "$_d_hdr" ]; then
+      curl -fsSL --connect-timeout 8 --max-time 120 --retry 2 --retry-delay 2 \
+           --retry-all-errors -H "$_d_hdr" -o "$_d_out" "$_d_url" >/dev/null 2>&1
+    else
+      curl -fsSL --connect-timeout 8 --max-time 120 --retry 2 --retry-delay 2 \
+           --retry-all-errors -o "$_d_out" "$_d_url" >/dev/null 2>&1
+    fi
   elif command -v wget >/dev/null 2>&1; then
-    local wargs=()
-    for h in "$@"; do wargs+=(--header="$h"); done
-    wget -q -T 30 "${wargs[@]}" -O "$out" "$url" >/dev/null 2>&1
+    if [ -n "$_d_hdr" ]; then
+      wget -q -T 30 --header="$_d_hdr" -O "$_d_out" "$_d_url" >/dev/null 2>&1
+    else
+      wget -q -T 30 -O "$_d_out" "$_d_url" >/dev/null 2>&1
+    fi
   else
     return 1
   fi
 }
 
 download_backend() { # <os> <dest>
-  local os="$1" dest="$2" f sh url api tmp
-  f=$(backend_name "$os"); sh=$(shell_for "$os")
-  tmp="${dest}.part.$$"
-  url="https://raw.githubusercontent.com/$REPO/$BRANCH/$f?ts=$(date +%s)"
-  api="https://api.github.com/repos/$REPO/contents/$f?ref=$BRANCH"
+  _os="$1"; _dest="$2"
+  _f=$(backend_name "$_os"); _sh=$(shell_for "$_os")
+  _tmp="${_dest}.part.$$"
+  _url="https://raw.githubusercontent.com/$REPO/$BRANCH/$_f?ts=$(date +%s)"
+  _api="https://api.github.com/repos/$REPO/contents/$_f?ref=$BRANCH"
 
-  say "   下载 $f ..."
-  if dl "$url" "$tmp" && valid_backend "$tmp" "$sh"; then
-    mv -f "$tmp" "$dest"; return 0
+  say "   下载 $_f ..."
+  rm -f "$_tmp" 2>/dev/null
+  if dl "$_url" "$_tmp" && valid_backend "$_tmp" "$_sh"; then
+    mv -f "$_tmp" "$_dest"; return 0
   fi
-  rm -f "$tmp"
+  rm -f "$_tmp" 2>/dev/null
   warn "raw.githubusercontent 直链不可用，改用 GitHub API"
-  if dl "$api" "$tmp" "Accept: application/vnd.github.raw" && valid_backend "$tmp" "$sh"; then
-    mv -f "$tmp" "$dest"; return 0
+  if dl "$_api" "$_tmp" "Accept: application/vnd.github.raw" && valid_backend "$_tmp" "$_sh"; then
+    mv -f "$_tmp" "$_dest"; return 0
   fi
-  rm -f "$tmp"
+  rm -f "$_tmp" 2>/dev/null
   return 1
 }
 
 writable_dir() { mkdir -p "$1" 2>/dev/null && [ -w "$1" ] && echo "$1"; }
 
 resolve_backend() { # <os> -> 打印后端路径
-  local os="$1" f sh c dir
-  f=$(backend_name "$os"); sh=$(shell_for "$os")
+  _os="$1"
+  _f=$(backend_name "$_os"); _sh=$(shell_for "$_os")
 
-  for c in "$SELF_DIR/$f" "$SHARE_DIR/$f"; do
-    if [ -f "$c" ] && valid_backend "$c" "$sh"; then echo "$c"; return 0; fi
+  for _c in "$SELF_DIR/$_f" "$SHARE_DIR/$_f"; do
+    if [ -f "$_c" ] && valid_backend "$_c" "$_sh"; then echo "$_c"; return 0; fi
   done
 
-  dir=$(writable_dir "$CACHE_DIR" || writable_dir "$FALLBACK_CACHE" || true)
-  if [ -n "${dir:-}" ] && [ -f "$dir/$f" ] && valid_backend "$dir/$f" "$sh"; then
-    if [ "${OFFLINE:-0}" = 1 ]; then echo "$dir/$f"; return 0; fi
-    if download_backend "$os" "$dir/$f" >/dev/null 2>&1; then echo "$dir/$f"; return 0; fi
-    warn "联网刷新失败，改用本地缓存 $dir/$f"
-    echo "$dir/$f"; return 0
+  _dir=$(writable_dir "$CACHE_DIR" || writable_dir "$FALLBACK_CACHE" || true)
+  if [ -n "${_dir:-}" ] && [ -f "$_dir/$_f" ] && valid_backend "$_dir/$_f" "$_sh"; then
+    if [ "${OFFLINE:-0}" = 1 ]; then echo "$_dir/$_f"; return 0; fi
+    if download_backend "$_os" "$_dir/$_f" >/dev/null 2>&1; then echo "$_dir/$_f"; return 0; fi
+    warn "联网刷新失败，改用本地缓存 $_dir/$_f" >&2
+    echo "$_dir/$_f"; return 0
   fi
 
   if [ "${OFFLINE:-0}" = 1 ]; then
-    bad "--offline 但没有可用的本地后端（${f}）"; return 1
+    bad "--offline 但没有可用的本地后端（${_f}）"; return 1
   fi
-  [ -n "${dir:-}" ] || { bad "没有可写的缓存目录（$CACHE_DIR / ${FALLBACK_CACHE}）"; return 1; }
-  download_backend "$os" "$dir/$f" || { bad "下载后端失败：$f"; return 1; }
-  valid_backend "$dir/$f" "$sh" || { bad "后端校验失败：$dir/$f"; return 1; }
-  echo "$dir/$f"
+  [ -n "${_dir:-}" ] || { bad "没有可写的缓存目录（$CACHE_DIR / ${FALLBACK_CACHE}）"; return 1; }
+  download_backend "$_os" "$_dir/$_f" || { bad "下载后端失败：$_f"; return 1; }
+  valid_backend "$_dir/$_f" "$_sh" || { bad "后端校验失败：$_dir/$_f"; return 1; }
+  echo "$_dir/$_f"
 }
 
 # ---------------- 参数解析 ----------------
 APPLY=0; OFFLINE=0; WANT_SSH=0; FORCE_OS="${VPS_TUNE_OS:-}"
-RAW=()
+NL='
+'
+RAW=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help)    usage; exit 0 ;;
@@ -175,7 +185,7 @@ while [ $# -gt 0 ]; do
     --os)         if [ $# -lt 2 ]; then bad "--os 缺少取值（alpine|debian）"; exit 2; fi
                   FORCE_OS="$2"; shift ;;
     --os=*)       FORCE_OS="${1#--os=}" ;;
-    *)            RAW+=("$1") ;;
+    *)            RAW="$RAW$NL$1" ;;
   esac
   shift
 done
@@ -195,51 +205,60 @@ DROP_DEBIAN=" --no-tools --no-tz --sysctl-only "
 
 if [ "$OS" = alpine ]; then DROP="$DROP_ALPINE"; else DROP="$DROP_DEBIAN"; fi
 
-FINAL=()
-i=0
-while [ $i -lt ${#RAW[@]} ]; do
-  t="${RAW[$i]}"
+set -f
+set -- $RAW
+set +f
+FINAL=""
+while [ $# -gt 0 ]; do
+  t="$1"
   case "$DROP" in
     *" $t "*)
       case "$VALUE_FLAGS" in
-        *" $t "*) warn "本后端不支持 ${t}（连其取值），已忽略"; i=$((i+2)); continue ;;
-        *)        warn "本后端不支持 ${t}，已忽略"; i=$((i+1)); continue ;;
+        *" $t "*) if [ $# -ge 2 ]; then warn "本后端不支持 ${t}（连其取值），已忽略"; shift 2
+                  else warn "本后端不支持 ${t}，已忽略"; shift; fi
+                  continue ;;
+        *)        warn "本后端不支持 ${t}，已忽略"; shift; continue ;;
       esac ;;
   esac
-  FINAL+=("$t"); i=$((i+1))
+  FINAL="$FINAL$NL$t"; shift
 done
 
 if [ "$OS" = alpine ]; then
   # tune-alpine.sh 默认就执行，演练要显式 --dry-run
-  [ "$APPLY" = 1 ] || FINAL=("--dry-run" "${FINAL[@]}")
+  [ "$APPLY" = 1 ] || FINAL="${NL}--dry-run$FINAL"
 else
   # tune-debian.sh 默认演练，执行要显式 --apply
-  [ "$APPLY" = 1 ] && FINAL=("--apply" "${FINAL[@]}")
+  [ "$APPLY" = 1 ] && FINAL="${NL}--apply$FINAL"
 fi
-[ "$WANT_SSH" = 1 ] || FINAL+=("--no-ssh")
+[ "$WANT_SSH" = 1 ] || FINAL="$FINAL${NL}--no-ssh"
 
-# 去重并解决 --apply / --dry-run 冲突（--apply 优先）
-DEDUP=(); HAVE_APPLY=0
-for a in "${FINAL[@]+"${FINAL[@]}"}"; do
+# 去重 + 解决 --apply / --dry-run 冲突（--apply 优先）
+set -f
+set -- $FINAL
+set +f
+HAVE_APPLY=0
+for a in "$@"; do [ "$a" = "--apply" ] && HAVE_APPLY=1; done
+SEEN="|"
+DEDUP=""
+for a in "$@"; do
   [ -z "$a" ] && continue
-  [ "$a" = "--apply" ] && HAVE_APPLY=1
+  if [ "$a" = "--dry-run" ] && [ "$HAVE_APPLY" = 1 ]; then continue; fi
+  case "$SEEN" in *"|$a|"*) continue ;; esac
+  SEEN="$SEEN$a|"
+  DEDUP="$DEDUP$NL$a"
 done
-for a in "${FINAL[@]+"${FINAL[@]}"}"; do
-  [ -z "$a" ] && continue
-  case "$a" in
-    --dry-run) [ "$HAVE_APPLY" = 1 ] && continue ;;
-  esac
-  _dup=0
-  for b in ${DEDUP[@]+"${DEDUP[@]}"}; do [ "$a" = "$b" ] && { _dup=1; break; }; done
-  [ "$_dup" = 1 ] && continue
-  DEDUP+=("$a")
-done
-FINAL=(${DEDUP[@]+"${DEDUP[@]}"})
 
 BACKEND=$(resolve_backend "$OS") || exit 4
 SH=$(shell_for "$OS")
 
+set -f
+set -- $DEDUP
+set +f
 say "${C_G}vps-tune${C_N} $VERSION  后端 $(basename "$BACKEND")（${OS}）"
-say "   参数: ${FINAL[*]:-（无）}"
+if [ -n "$DEDUP" ]; then
+  say "   参数: $*"
+else
+  say "   参数: （无）"
+fi
 say ""
-exec "$SH" "$BACKEND" ${FINAL[*]+"${FINAL[@]}"}
+exec "$SH" "$BACKEND" "$@"
