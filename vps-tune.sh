@@ -1,6 +1,6 @@
 #!/bin/sh
 # =========================================================
-# vps-tune.sh  v1.0.4 (2026-11-09)
+# vps-tune.sh  v1.0.5 (2026-11-16)
 # VPS 一键调优统一入口：自动识别 Alpine / Debian / Ubuntu 并调用对应后端
 #
 # 后端:
@@ -19,9 +19,11 @@
 # =========================================================
 set -u
 
-VERSION="1.0.4"
+VERSION="1.0.5"
 REPO="${VPS_TUNE_REPO:-jyucoeng/vps-tune}"
 BRANCH="${VPS_TUNE_BRANCH:-main}"
+MIRRORS="${VPS_TUNE_MIRRORS:-https://gh-proxy.com,https://ghproxy.net,https://ghfast.top,https://gh.llkk.cc,https://github.moeyy.xyz}"
+JSDELIVR="${VPS_TUNE_JSDELIVR:-1}"
 CACHE_DIR="${VPS_TUNE_CACHE_DIR:-/var/cache/vps-tune}"
 FALLBACK_CACHE="/tmp/vps-tune-cache"
 SHARE_DIR="/usr/local/share/vps-tune"
@@ -68,6 +70,8 @@ vps-tune — VPS 一键调优统一入口（Alpine / Debian / Ubuntu）
   VPS_TUNE_BRANCH    默认 main
   VPS_TUNE_CACHE_DIR 后端脚本缓存目录，默认 /var/cache/vps-tune
   VPS_TUNE_OS        等价于 --os
+  VPS_TUNE_MIRRORS   GitHub 镜像前缀，逗号分隔；填 none 关闭
+  VPS_TUNE_JSDELIVR  1/0，是否用 jsDelivr 兜底，默认 1
 
 注意: 参数按空格切分，取值里不要带空格（时区、主机名、容量都没有空格）。
 EOF
@@ -97,6 +101,8 @@ shell_for()    { if [ "$1" = alpine ]; then echo sh; else echo bash; fi; }
 
 valid_backend() { # <file> <sh>
   [ -s "$1" ] || return 1
+  # 首行必须是 shebang：挡住 404 页、API 限流 JSON、运营商劫持页
+  head -c 2 "$1" 2>/dev/null | grep -q '#!' || return 1
   head -c 200 "$1" 2>/dev/null | grep -qi '<!doctype\|<html' && return 1
   "$2" -n "$1" >/dev/null 2>&1
 }
@@ -126,22 +132,47 @@ download_backend() { # <os> <dest>
   _os="$1"; _dest="$2"
   _f=$(backend_name "$_os"); _sh=$(shell_for "$_os")
   _tmp="${_dest}.part.$$"
-  _url="https://raw.githubusercontent.com/$REPO/$BRANCH/$_f?ts=$(date +%s)"
+  _cand="${_dest}.cand.$$"
+  _raw="https://raw.githubusercontent.com/$REPO/$BRANCH/$_f"
   _api="https://api.github.com/repos/$REPO/contents/$_f?ref=$BRANCH"
 
   say "   下载 $_f ..." >&2
-  rm -f "$_tmp" 2>/dev/null
+  rm -f "$_tmp" "$_cand" 2>/dev/null
+
   # 先走 GitHub API：raw.githubusercontent 的 CDN 会长期留着旧副本（带 ?ts= 也压不住），
   # 旧副本语法合法但内容过期，很容易被误当成「下载成功」。API 的 contents 接口不吃这层缓存。
   if dl "$_api" "$_tmp" "Accept: application/vnd.github.raw" && valid_backend "$_tmp" "$_sh"; then
     mv -f "$_tmp" "$_dest"; return 0
   fi
   rm -f "$_tmp" 2>/dev/null
-  warn "GitHub API 不可用（可能是限流），改用 raw 直链（可能是旧版本）"
-  if dl "$_url" "$_tmp" && valid_backend "$_tmp" "$_sh"; then
-    mv -f "$_tmp" "$_dest"; return 0
-  fi
-  rm -f "$_tmp" 2>/dev/null
+
+  # API 挂了（限流 / 403 / 被墙）就换直链、jsDelivr、镜像逐个试：
+  # 国内 VPS 上 raw.githubusercontent.com 经常整个不可达，只有镜像能过。
+  {
+    printf '%s?ts=%s\n' "$_raw" "$(date +%s)"
+    if [ "${JSDELIVR:-1}" = 1 ]; then
+      printf 'https://cdn.jsdelivr.net/gh/%s@%s/%s\n' "$REPO" "$BRANCH" "$_f"
+    fi
+    for _m in $(printf '%s' "$MIRRORS" | tr ',' ' '); do
+      [ -n "$_m" ] || continue
+      [ "$_m" = none ] && continue
+      printf '%s/%s\n' "${_m%/}" "$_raw"
+    done
+  } > "$_cand" 2>/dev/null
+
+  while IFS= read -r _u; do
+    [ -n "$_u" ] || continue
+    if dl "$_u" "$_tmp" && valid_backend "$_tmp" "$_sh"; then
+      mv -f "$_tmp" "$_dest"
+      say "   来源：$_u" >&2
+      rm -f "$_cand" 2>/dev/null
+      return 0
+    fi
+    rm -f "$_tmp" 2>/dev/null
+  done < "$_cand"
+
+  rm -f "$_cand" "$_tmp" 2>/dev/null
+  warn "GitHub API 限流，直链 / jsDelivr / 镜像全部失败"
   return 1
 }
 
