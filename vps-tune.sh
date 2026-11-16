@@ -1,6 +1,6 @@
 #!/bin/sh
 # =========================================================
-# vps-tune.sh  v1.0.5 (2026-11-16)
+# vps-tune.sh  v1.0.6 (2026-11-16)
 # VPS 一键调优统一入口：自动识别 Alpine / Debian / Ubuntu 并调用对应后端
 #
 # 后端:
@@ -19,14 +19,18 @@
 # =========================================================
 set -u
 
-VERSION="1.0.5"
+VERSION="1.0.6"
 REPO="${VPS_TUNE_REPO:-jyucoeng/vps-tune}"
 BRANCH="${VPS_TUNE_BRANCH:-main}"
 MIRRORS="${VPS_TUNE_MIRRORS:-https://gh-proxy.com,https://ghproxy.net,https://ghfast.top,https://gh.llkk.cc,https://github.moeyy.xyz}"
 JSDELIVR="${VPS_TUNE_JSDELIVR:-1}"
+CONNECT_TIMEOUT="${VPS_TUNE_CONNECT_TIMEOUT:-8}"
+MAX_TIME="${VPS_TUNE_MAX_TIME:-120}"
+DL_FAMILY="${VPS_TUNE_DL_FAMILY:-auto}"
 CACHE_DIR="${VPS_TUNE_CACHE_DIR:-/var/cache/vps-tune}"
 FALLBACK_CACHE="/tmp/vps-tune-cache"
 SHARE_DIR="/usr/local/share/vps-tune"
+DL_TRACE=""
 SELF_DIR=$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd -P || echo .)
 
 if [ -t 1 ]; then
@@ -72,6 +76,8 @@ vps-tune — VPS 一键调优统一入口（Alpine / Debian / Ubuntu）
   VPS_TUNE_OS        等价于 --os
   VPS_TUNE_MIRRORS   GitHub 镜像前缀，逗号分隔；填 none 关闭
   VPS_TUNE_JSDELIVR  1/0，是否用 jsDelivr 兜底，默认 1
+  VPS_TUNE_CONNECT_TIMEOUT / VPS_TUNE_MAX_TIME  单次下载的连接/总超时秒数，默认 8 / 120
+  VPS_TUNE_DL_FAMILY auto/4/6，强制只走 IPv4 或 IPv6（纯 v6 机器会自动优先 -6），排障用
 
 注意: 参数按空格切分，取值里不要带空格（时区、主机名、容量都没有空格）。
 EOF
@@ -107,25 +113,67 @@ valid_backend() { # <file> <sh>
   "$2" -n "$1" >/dev/null 2>&1
 }
 
+has_v4_route() {
+  command -v ip >/dev/null 2>&1 || return 0
+  [ -n "$(ip -4 route show default 2>/dev/null)" ]
+}
+
+dl_curl() { # <url> <out> <header> <family-flag>
+  command -v curl >/dev/null 2>&1 || return 1
+  # shellcheck disable=SC2086
+  if [ -n "$3" ]; then
+    curl -fsSL $4 --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" \
+         --retry 2 --retry-delay 2 --retry-all-errors -H "$3" -o "$2" "$1" 2>"${2}.err"
+  else
+    curl -fsSL $4 --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" \
+         --retry 2 --retry-delay 2 --retry-all-errors -o "$2" "$1" 2>"${2}.err"
+  fi
+}
+
+dl_wget() { # <url> <out> <header>
+  command -v wget >/dev/null 2>&1 || return 1
+  # busybox wget 不认 -6/-4，这里不传族参数，只用它兜底
+  if [ -n "$3" ]; then
+    wget -q -T 30 --header="$3" -O "$2" "$1" >/dev/null 2>&1
+  else
+    wget -q -T 30 -O "$2" "$1" >/dev/null 2>&1
+  fi
+}
+
 dl() { # <url> <out> [header]
   _d_url="$1"; _d_out="$2"; _d_hdr="${3:-}"
-  if command -v curl >/dev/null 2>&1; then
-    if [ -n "$_d_hdr" ]; then
-      curl -fsSL --connect-timeout 8 --max-time 120 --retry 2 --retry-delay 2 \
-           --retry-all-errors -H "$_d_hdr" -o "$_d_out" "$_d_url" >/dev/null 2>&1
-    else
-      curl -fsSL --connect-timeout 8 --max-time 120 --retry 2 --retry-delay 2 \
-           --retry-all-errors -o "$_d_out" "$_d_url" >/dev/null 2>&1
+  rm -f "$_d_out" 2>/dev/null
+  # 纯 IPv6 的机器没有 IPv4 默认路由：默认尝试会白等一个 connect-timeout，直接先 -6。
+  # VPS_TUNE_DL_FAMILY=4/6 可强制某一族（排障用）。
+  case "$DL_FAMILY" in
+    4) _d_fams="4 6" ;;
+    6) _d_fams="6 4" ;;
+    *)
+      if has_v4_route; then _d_fams="d 4 6"; else _d_fams="6 4"; fi
+      ;;
+  esac
+  for _d_f in $_d_fams; do
+    case "$_d_f" in
+      4) _d_flag="-4" ;;
+      6) _d_flag="-6" ;;
+      *) _d_flag="" ;;
+    esac
+    if dl_curl "$_d_url" "$_d_out" "$_d_hdr" "$_d_flag"; then
+      rm -f "${_d_out}.err" 2>/dev/null
+      return 0
     fi
-  elif command -v wget >/dev/null 2>&1; then
-    if [ -n "$_d_hdr" ]; then
-      wget -q -T 30 --header="$_d_hdr" -O "$_d_out" "$_d_url" >/dev/null 2>&1
-    else
-      wget -q -T 30 -O "$_d_out" "$_d_url" >/dev/null 2>&1
-    fi
-  else
-    return 1
+    DL_TRACE="$DL_TRACE
+  [${_d_flag:-默认}] $(printf '%s' "$_d_url" | cut -c1-72) → $(head -c 120 "${_d_out}.err" 2>/dev/null | tr '\n' ' ')"
+    rm -f "$_d_out" 2>/dev/null
+  done
+  if dl_wget "$_d_url" "$_d_out" "$_d_hdr"; then
+    rm -f "${_d_out}.err" 2>/dev/null
+    return 0
   fi
+  DL_TRACE="$DL_TRACE
+  [wget] $(printf '%s' "$_d_url" | cut -c1-72) → wget 也失败"
+  rm -f "$_d_out" 2>/dev/null
+  return 1
 }
 
 download_backend() { # <os> <dest>
@@ -151,7 +199,9 @@ download_backend() { # <os> <dest>
   {
     printf '%s?ts=%s\n' "$_raw" "$(date +%s)"
     if [ "${JSDELIVR:-1}" = 1 ]; then
-      printf 'https://cdn.jsdelivr.net/gh/%s@%s/%s\n' "$REPO" "$BRANCH" "$_f"
+      for _jd in cdn.jsdelivr.net fastly.jsdelivr.net gcore.jsdelivr.net; do
+        printf 'https://%s/gh/%s@%s/%s\n' "$_jd" "$REPO" "$BRANCH" "$_f"
+      done
     fi
     for _m in $(printf '%s' "$MIRRORS" | tr ',' ' '); do
       [ -n "$_m" ] || continue
@@ -173,6 +223,13 @@ download_backend() { # <os> <dest>
 
   rm -f "$_cand" "$_tmp" 2>/dev/null
   warn "GitHub API 限流，直链 / jsDelivr / 镜像全部失败"
+  if ! has_v4_route; then
+    warn "本机没有 IPv4 默认路由（纯 IPv6），已用 curl -6 逐个试过；仍失败请确认 IPv6 出网正常（ping6 2001:4860:4860::8888）"
+  fi
+  # 把最后几条尝试记录打出来，方便判断卡在 DNS / 连接 / 证书哪一步
+  printf '%s\n' "$DL_TRACE" | tail -5 | while IFS= read -r _l; do
+    [ -n "$_l" ] && warn "$_l"
+  done
   return 1
 }
 
